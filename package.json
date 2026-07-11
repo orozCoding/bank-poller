@@ -1,0 +1,14 @@
+{
+  "name": "bank-poller",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "poll:once": "POLL_ONCE=1 node src/index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "playwright": "^1.54.0"
+  }
+}
