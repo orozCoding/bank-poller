@@ -6,30 +6,35 @@ Small local poller for the first milestone:
 - visit the bank portal every few minutes
 - scrape the latest movement rows
 - dedupe by a stable fingerprint
-- post new movements to a Slack incoming webhook
+- post new movements to Slack
 
-This tool is intentionally separate from Rails. The goal is to prove that polling
-works reliably before wiring it into `BalanceTransaction#post!`.
+This repo is now BDV-first. It defaults to Banco de Venezuela personas:
+
+- login URL: `https://bdvenlinea.banvenez.com/`
+- consolidated page: `https://bdvenlinea.banvenez.com/main/posicionconsolidada`
+- incoming notifications only by default
+- reference suffix extraction (`last 6`) built in
 
 ## What it does
 
 1. Opens a persistent Playwright browser profile.
 2. Tries to reuse the existing authenticated session.
 3. Detects session expiry and attempts login again.
-4. Scrapes the latest rows using selectors from `.env`.
-5. Saves local seen-state in JSON so the same movement is not announced twice.
-6. Posts each new movement to Slack through `SLACK_WEBHOOK_URL`.
+4. Opens the first `Movimientos` action from Posición Consolidada when needed.
+5. Scrapes the latest BDV movement rows.
+6. Keeps only incoming credits by default.
+7. Posts the amount, full reference, and last 6 digits to Slack.
+8. Saves local seen-state in JSON so the same movement is not announced twice.
 
 ## Setup
 
 1. Copy `.env.example` to `.env`.
-2. Fill the Slack webhook URL.
-3. Fill the bank URLs and selectors.
-4. If the bank allows scripted login, fill the username/password selectors too.
-5. Install dependencies:
+2. Fill `SLACK_BOT_TOKEN` and `SLACK_CHANNEL`.
+3. Fill `BANK_USERNAME` and `BANK_PASSWORD`.
+4. Install dependencies:
 
 ```bash
-cd script/bank_poller
+cd ~/bank-poller
 npm install
 ```
 
@@ -38,44 +43,84 @@ npm install
 Start with a visible browser:
 
 ```bash
-cd script/bank_poller
+cd ~/bank-poller
 npm run poll:once
 ```
 
-If the bank requires OTP/captcha/manual confirmation:
+If BDV requires any manual confirmation:
 
 - leave `HEADLESS=false`
 - let the script open the portal
 - complete the login manually in the opened browser window
 - run `npm run poll:once` again once the session is valid
 
-The persistent browser profile is stored in `script/bank_poller/data/browser_profile`,
-so later runs can usually reuse the same session until the bank expires it.
+The persistent browser profile lives under `data/browser_profile`, so later
+runs can usually reuse the same session until the bank expires it.
 
 ## Continuous polling
 
 ```bash
-cd script/bank_poller
+cd ~/bank-poller
 npm start
 ```
+
+## Inspecting an unknown bank page
+
+When I do not know the bank UI yet, the fastest path is to let the tool capture
+artifacts from a real session.
+
+1. Put the page you care about in `BANK_INSPECT_URL`, or reuse `BANK_MOVEMENTS_URL`
+   if you already know it.
+2. Run:
+
+```bash
+cd ~/bank-poller
+npm run inspect
+```
+
+3. If the portal needs manual login or OTP, complete that in the opened browser.
+4. After the wait window, inspect mode saves:
+
+- screenshot
+- full HTML
+- page text
+- metadata JSON
+- row previews when `BANK_ROWS_SELECTOR` is configured
+
+Artifacts land in `data/debug/`. That is enough for me to identify selectors and
+session-expiry signals without guessing the UI.
 
 Default schedule:
 
 - base interval: `180` seconds
-- jitter: `0..90` seconds
+- jitter: `±90` seconds (symmetric, so the cadence isn't robotic)
+- on failure: exponential backoff (interval doubles per consecutive failure) up
+  to `POLL_MAX_BACKOFF_SECONDS` (default `1800`), so a broken run never hammers
+  the bank.
 
-So each run sleeps roughly 3 to 4.5 minutes between polls.
+So a healthy run sleeps roughly 1.5 to 4.5 minutes between polls. The browser
+session is kept alive for the life of the process and reused across polls — it
+only logs in again when the bank actually expires the session, which minimizes
+bot-like login activity.
+
+## Heartbeat ("still alive") message
+
+When `SLACK_HEARTBEAT=true` (default), every successful check posts a heartbeat
+to Slack even when there are no new payments, so you can see the poller is live.
+It edits a single message in place (via `chat.update`) to show the last check
+time — e.g. `🟢 Banco de Venezuela: sin nuevos pagos. Última verificación: …` —
+instead of flooding the channel. When a real payment is posted, the heartbeat
+starts a fresh message below it. Set `SLACK_HEARTBEAT=false` to only notify on
+payments. `TIMEZONE` (default `America/Caracas`) controls the timestamp.
 
 ## Important env vars
 
-- `BANK_ROWS_SELECTOR`: required. Selector for each movement row.
-- `BANK_AMOUNT_SELECTOR`: recommended.
-- `BANK_REFERENCE_SELECTOR`: recommended.
-- `BANK_DATE_SELECTOR`: recommended.
-- `BANK_DESCRIPTION_SELECTOR`: recommended.
-- `BANK_LOGGED_IN_SELECTOR`: useful for session detection.
-- `BANK_SESSION_EXPIRED_SELECTOR` or `BANK_SESSION_EXPIRED_TEXT`: useful for re-login detection.
-- `BANK_REFRESH_SELECTOR`: optional refresh button inside the movement page.
+- `SLACK_BOT_TOKEN`: required for polling mode.
+- `SLACK_CHANNEL`: required for polling mode. Default example: `#pagos-clientes`.
+- `BANK_USERNAME` / `BANK_PASSWORD`: recommended so the poller can recover after session expiry.
+- `NOTIFY_ONLY_INCOMING=true`: default. Only credits are sent to Slack.
+- `REFERENCE_SUFFIX_LENGTH=6`: default. Used for the "last 6 digits" field.
+- `BANK_*_SELECTOR`: optional advanced overrides only if BDV changes its UI.
 
 ## Local files
 
@@ -87,7 +132,6 @@ The poller writes:
 
 ## Notes
 
-- This is the right first MVP if your current goal is only "poll and notify".
-- It is not yet connected to Botente billing.
-- Once polling is stable, the next step is a matcher that turns a Slack alert into
-  an automatic `posted` transition for a matching pending top-up.
+- This repo is intentionally separate from Botente.
+- The current target is "poll and notify", not payment validation yet.
+- The next step after stable polling is matching incoming credits against customer-submitted references.

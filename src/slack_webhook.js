@@ -1,30 +1,69 @@
-export class SlackWebhookClient {
-  constructor({ webhookUrl, bankName }) {
-    this.webhookUrl = webhookUrl;
+const SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage";
+const SLACK_UPDATE_MESSAGE_URL = "https://slack.com/api/chat.update";
+
+export class SlackClient {
+  constructor({ botToken, channel, bankName }) {
+    this.botToken = botToken;
+    this.channel = channel;
     this.bankName = bankName;
   }
 
   async postMovement(movement) {
-    const response = await fetch(this.webhookUrl, {
+    const payload = buildPayload(this.bankName, movement, this.channel);
+    return this.postWithBotToken(payload);
+  }
+
+  // Keep a single heartbeat message and edit it in place so the channel isn't
+  // flooded. Falls back to posting a fresh message if there's no prior one, or
+  // if the stored message can't be edited (deleted, too old, etc.). Returns the
+  // message reference { channel, ts } to persist for the next update.
+  async postOrUpdateHeartbeat(text, previous) {
+    if (previous && previous.ts && previous.channel) {
+      const updated = await this.postWithBotToken(
+        { channel: previous.channel, ts: previous.ts, text },
+        SLACK_UPDATE_MESSAGE_URL
+      ).catch(() => null);
+      if (updated) return { channel: updated.channel, ts: updated.ts };
+    }
+
+    const payload = { text };
+    if (this.channel) payload.channel = this.channel;
+    const posted = await this.postWithBotToken(payload);
+    return { channel: posted.channel, ts: posted.ts };
+  }
+
+  async postWithBotToken(payload, url = SLACK_POST_MESSAGE_URL) {
+    const response = await fetch(url, {
       method: "POST",
       headers: {
+        Authorization: `Bearer ${this.botToken}`,
         "Content-Type": "application/json; charset=utf-8"
       },
-      body: JSON.stringify(buildPayload(this.bankName, movement))
+      body: JSON.stringify(payload)
     });
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`Slack webhook failed with HTTP ${response.status}: ${body.slice(0, 300)}`);
+      throw new Error(`Slack API failed with HTTP ${response.status}: ${body.slice(0, 300)}`);
     }
+
+    const body = await response.json();
+    if (!body.ok) {
+      throw new Error(`Slack API error: ${body.error || "unknown_error"}`);
+    }
+
+    return body;
   }
 }
 
-function buildPayload(bankName, movement) {
-  const title = `${bankName}: nuevo movimiento detectado`;
-  const summary = [movement.amountText, movement.reference].filter(Boolean).join(" · ");
+function buildPayload(bankName, movement, channel) {
+  const title = `${bankName}: ingreso detectado`;
+  const summary = [
+    movement.amountText,
+    movement.referenceLastDigits ? `ref ${movement.referenceLastDigits}` : movement.reference
+  ].filter(Boolean).join(" · ");
 
-  return {
+  const payload = {
     text: summary ? `${title} — ${summary}` : title,
     blocks: [
       {
@@ -39,8 +78,9 @@ function buildPayload(bankName, movement) {
         fields: [
           markdownField("*Monto*\n" + fallback(movement.amountText)),
           markdownField("*Referencia*\n" + fallback(movement.reference)),
+          markdownField("*Últimos 6*\n" + fallback(movement.referenceLastDigits)),
           markdownField("*Fecha*\n" + fallback(movement.date)),
-          markdownField("*Valor numérico*\n" + fallback(movement.amountValue))
+          markdownField("*Tipo*\n" + fallback(movement.debitCredit))
         ]
       },
       {
@@ -54,7 +94,7 @@ function buildPayload(bankName, movement) {
         type: "section",
         text: {
           type: "mrkdwn",
-          text: `*Texto crudo*\n${escapeMrkdwn(fallback(movement.rawText)).slice(0, 2800)}`
+          text: `*Saldo*\n${escapeMrkdwn(fallback(movement.balanceText))}`
         }
       },
       {
@@ -68,6 +108,9 @@ function buildPayload(bankName, movement) {
       }
     ]
   };
+
+  if (channel) payload.channel = channel;
+  return payload;
 }
 
 function markdownField(text) {

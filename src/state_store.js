@@ -16,8 +16,18 @@ export class StateStore {
       lastRunAt: null,
       lastSuccessAt: null,
       lastErrorAt: null,
-      lastErrorMessage: null
+      lastErrorMessage: null,
+      heartbeat: null
     };
+  }
+
+  getHeartbeat() {
+    return this.state.heartbeat;
+  }
+
+  async setHeartbeat(reference) {
+    this.state.heartbeat = reference;
+    await this.save();
   }
 
   async load() {

@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node src/index.js",
     "poll:once": "POLL_ONCE=1 node src/index.js",
+    "inspect": "node src/inspect.js",
     "test": "node --test"
   },
   "dependencies": {

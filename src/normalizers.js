@@ -45,6 +45,7 @@ export function fingerprintMovement(movement) {
     normalizeWhitespace(movement.bankName),
     normalizeWhitespace(movement.date),
     normalizeWhitespace(movement.reference),
+    normalizeWhitespace(movement.debitCredit),
     normalizeWhitespace(movement.amountText),
     normalizeWhitespace(movement.description),
     normalizeWhitespace(movement.rawText)
@@ -53,26 +54,41 @@ export function fingerprintMovement(movement) {
   return crypto.createHash("sha256").update(payload).digest("hex");
 }
 
-export function normalizeMovement(rawMovement, bankName) {
+export function normalizeMovement(rawMovement, bankName, options = {}) {
+  const referenceSuffixLength = Number.isFinite(options.referenceSuffixLength)
+    ? options.referenceSuffixLength
+    : 6;
   const date = normalizeWhitespace(rawMovement.date);
   const reference = normalizeWhitespace(rawMovement.reference);
   const description = normalizeWhitespace(rawMovement.description);
+  const debitCredit = normalizeWhitespace(rawMovement.debitCredit).toUpperCase();
   const rawText = normalizeWhitespace(rawMovement.rawText);
   const amountText = normalizeAmountText(rawMovement.amountText || rawText);
+  const balanceText = normalizeAmountText(rawMovement.balanceText || "");
+  const amountValue = parseAmountValue(amountText);
+  const balanceValue = parseAmountValue(balanceText);
+  const referenceLastDigits = reference ? reference.slice(-referenceSuffixLength) : "";
+  const isIncoming = debitCredit.includes("CREDITO") || (amountValue !== null && amountValue > 0);
 
   return {
     bankName,
     observedAt: new Date().toISOString(),
     date,
     reference,
+    referenceLastDigits,
+    debitCredit,
     amountText,
-    amountValue: parseAmountValue(amountText),
+    amountValue,
+    balanceText,
+    balanceValue,
     description,
     rawText,
+    isIncoming,
     fingerprint: fingerprintMovement({
       bankName,
       date,
       reference,
+      debitCredit,
       amountText,
       description,
       rawText

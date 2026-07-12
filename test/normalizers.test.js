@@ -47,7 +47,9 @@ test("normalizeMovement populates parsed fields and fingerprint", () => {
     {
       date: "11/07/2026 10:33 AM",
       reference: "ABC123",
+      debitCredit: "CREDITO",
       amountText: "Bs. 1.234,56",
+      balanceText: "Bs. 9.999,01",
       description: "Transferencia",
       rawText: "Transferencia ABC123 Bs. 1.234,56"
     },
@@ -56,5 +58,8 @@ test("normalizeMovement populates parsed fields and fingerprint", () => {
 
   assert.equal(movement.bankName, "Banco");
   assert.equal(movement.amountValue, 1234.56);
+  assert.equal(movement.balanceValue, 9999.01);
+  assert.equal(movement.referenceLastDigits, "ABC123");
+  assert.equal(movement.isIncoming, true);
   assert.ok(movement.fingerprint);
 });
