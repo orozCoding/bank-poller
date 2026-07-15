@@ -7,7 +7,7 @@ import { chromium } from "playwright";
 
 import { BankPortalScraper } from "./bank_portal_scraper.js";
 import { assertPollingConfig, loadConfig } from "./config.js";
-import { createLogger } from "./logger.js";
+import { createFeed, createLogger } from "./logger.js";
 import { SlackClient } from "./slack_webhook.js";
 import { StateStore } from "./state_store.js";
 
@@ -52,6 +52,7 @@ async function main() {
   const context = await chromium.launchPersistentContext(config.browser.userDataDir, browserOptions);
   const page = context.pages()[0] || await context.newPage();
 
+  const feed = createFeed({ timezone: config.timezone });
   const scraper = new BankPortalScraper({ page, config, logger });
   const slackClient = new SlackClient({
     botToken: config.slack.botToken,
@@ -104,20 +105,29 @@ async function main() {
       let postedCount = 0;
       for (const movement of movementsToPost) {
         if (config.poller.onlyIncoming && !movement.isIncoming) {
+          feed.line(`⏭ ${config.bank.name}: ${describeMovement(movement)} — omitido (no es ingreso)`);
           await stateStore.rememberMovement(movement);
           continue;
         }
 
         await slackClient.postMovement(movement);
+        feed.line(`💰 ${config.bank.name}: nuevo pago · ${describeMovement(movement)}`);
         postedCount += 1;
         await stateStore.rememberMovement(movement);
       }
+
+      feed.line(
+        postedCount > 0
+          ? `✓ ${config.bank.name}: ${postedCount} pago(s) notificado(s) · ${movements.length} movimientos revisados`
+          : `✓ ${config.bank.name}: sin nuevos pagos · ${movements.length} movimientos revisados`
+      );
 
       await sendHeartbeat({ config, slackClient, stateStore, logger, postedCount });
       await stateStore.markRunSuccess();
       consecutiveFailures = 0;
     } catch (error) {
       logger.error(error.message);
+      feed.line(`✗ ${config.bank.name}: verificación fallida · ${String(error.message).split("\n")[0]}`);
       await stateStore.markRunFailure(error);
       consecutiveFailures += 1;
     }
@@ -159,6 +169,14 @@ async function pollWithRetry(scraper, logger) {
   }
 
   throw lastError;
+}
+
+function describeMovement(movement) {
+  return [
+    movement.amountText || "—",
+    movement.referenceLastDigits ? `ref ${movement.referenceLastDigits}` : movement.reference,
+    movement.date
+  ].filter(Boolean).join(" · ");
 }
 
 async function sendHeartbeat({ config, slackClient, stateStore, logger, postedCount }) {

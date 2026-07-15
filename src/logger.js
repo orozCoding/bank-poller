@@ -1,3 +1,27 @@
+// A one-line-per-event console feed, separate from the timestamped log lines:
+// every cycle leaves exactly one trace (a payment, a quiet check, or a failure)
+// so the terminal reads like a receipt tape at a glance.
+export function createFeed({ timezone } = {}) {
+  return {
+    line(message) {
+      console.log(`[${clock(timezone)}] ${message}`);
+    }
+  };
+}
+
+function clock(timezone) {
+  try {
+    return new Intl.DateTimeFormat("es-VE", {
+      timeZone: timezone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(new Date());
+  } catch {
+    return new Date().toISOString().slice(11, 16);
+  }
+}
+
 export function createLogger(scope) {
   return {
     info(message, extra = null) {
