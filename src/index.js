@@ -18,6 +18,11 @@ dotenv.config({ path: path.join(ROOT_DIR, ".env") });
 
 const logger = createLogger("bank_poller");
 
+// Exposed so the fatal-error handler can release the bank session too: the
+// portal allows one session per client, so dying without logging out strands a
+// session that rejects the next run's login until it expires on its own.
+let releaseSession = null;
+
 async function main() {
   const config = loadConfig();
   assertPollingConfig(config);
@@ -51,7 +56,8 @@ async function main() {
   const slackClient = new SlackClient({
     botToken: config.slack.botToken,
     channel: config.slack.channel,
-    bankName: config.bank.name
+    bankName: config.bank.name,
+    timezone: config.timezone
   });
 
   let closing = false;
@@ -63,6 +69,7 @@ async function main() {
     await scraper.logout().catch(() => {});
     await context.close().catch(() => {});
   };
+  releaseSession = closeSession;
 
   const shutdown = async () => {
     logger.info("Shutting down");
@@ -72,12 +79,15 @@ async function main() {
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  // SIGHUP too (e.g. the terminal closing): Playwright's handleSIGHUP is off so
+  // Chrome survives the signal, which only helps if we log out before exiting.
+  process.on("SIGHUP", shutdown);
 
   let consecutiveFailures = 0;
 
   do {
     try {
-      const movements = await scraper.pollMovements();
+      const movements = await pollWithRetry(scraper, logger);
       await stateStore.recordLatestMovements(movements);
 
       const unseenMovements = movements.filter((movement) => !stateStore.hasFingerprint(movement.fingerprint));
@@ -87,8 +97,12 @@ async function main() {
 
       logger.info(`Poll complete. Found ${movements.length} rows, ${unseenMovements.length} new, ${notifyMovements.length} notifiable.`);
 
+      // The portal lists newest first. Post oldest -> newest so the channel reads
+      // chronologically and the most recent payment is the last message.
+      const movementsToPost = [...unseenMovements].reverse();
+
       let postedCount = 0;
-      for (const movement of unseenMovements) {
+      for (const movement of movementsToPost) {
         if (config.poller.onlyIncoming && !movement.isIncoming) {
           await stateStore.rememberMovement(movement);
           continue;
@@ -115,13 +129,47 @@ async function main() {
   await closeSession();
 }
 
+// The portal fails transiently in two observed ways: the page loads blank
+// (Angular never boots, so it never recovers no matter how long we wait), and
+// the movements dialog ignores the first click. Both clear on a fresh attempt,
+// so retry within the cycle — otherwise one blip costs a whole backoff window,
+// which at a 15-20 min poll interval means a ~30 min blackout.
+const POLL_ATTEMPTS = 3;
+const RETRY_PAUSE_MS = 5_000;
+
+async function pollWithRetry(scraper, logger) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= POLL_ATTEMPTS; attempt += 1) {
+    try {
+      return await scraper.pollMovements();
+    } catch (error) {
+      lastError = error;
+
+      // A session held elsewhere can't be retried away — it has to expire. Fail
+      // fast and let the loop's backoff wait it out instead of burning attempts.
+      if (/already active/i.test(error.message)) throw error;
+
+      if (attempt < POLL_ATTEMPTS) {
+        const reason = String(error.message).split("\n")[0];
+        logger.warn(`Poll attempt ${attempt}/${POLL_ATTEMPTS} failed (${reason}); retrying`);
+        await sleep(RETRY_PAUSE_MS);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 async function sendHeartbeat({ config, slackClient, stateStore, logger, postedCount }) {
   if (!config.slack.heartbeat) return;
 
-  const stamp = formatLocalTime(new Date(), config.timezone);
+  // Bold the timestamp: this message is edited in place, so the check time is
+  // the one thing that changes and the only thing worth scanning for.
+  const stamp = `*${formatLocalTime(new Date(), config.timezone)}*`;
   const text = postedCount > 0
-    ? `🟢 ${config.bank.name}: ${postedCount} nuevo(s) pago(s) notificado(s). Última verificación: ${stamp}.`
-    : `🟢 ${config.bank.name}: sin nuevos pagos. Última verificación: ${stamp}.`;
+    ? `🟢 ${config.bank.name}: ${postedCount} nuevo(s) pago(s) notificado(s). Última verificación: ${stamp}`
+    : `🟢 ${config.bank.name}: sin nuevos pagos. Última verificación: ${stamp}`;
 
   // When we just posted real payment messages, start a fresh heartbeat below
   // them; otherwise edit the existing heartbeat in place to avoid channel noise.
@@ -164,7 +212,8 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   logger.error(error.stack || error.message);
+  if (releaseSession) await releaseSession().catch(() => {});
   process.exit(1);
 });

@@ -2,14 +2,15 @@ const SLACK_POST_MESSAGE_URL = "https://slack.com/api/chat.postMessage";
 const SLACK_UPDATE_MESSAGE_URL = "https://slack.com/api/chat.update";
 
 export class SlackClient {
-  constructor({ botToken, channel, bankName }) {
+  constructor({ botToken, channel, bankName, timezone }) {
     this.botToken = botToken;
     this.channel = channel;
     this.bankName = bankName;
+    this.timezone = timezone;
   }
 
   async postMovement(movement) {
-    const payload = buildPayload(this.bankName, movement, this.channel);
+    const payload = buildPayload(this.bankName, movement, this.channel, this.timezone);
     return this.postWithBotToken(payload);
   }
 
@@ -56,7 +57,7 @@ export class SlackClient {
   }
 }
 
-function buildPayload(bankName, movement, channel) {
+function buildPayload(bankName, movement, channel, timezone) {
   const title = `${bankName}: ingreso detectado`;
   const summary = [
     movement.amountText,
@@ -78,8 +79,7 @@ function buildPayload(bankName, movement, channel) {
         fields: [
           markdownField("*Monto*\n" + fallback(movement.amountText)),
           markdownField("*Referencia*\n" + fallback(movement.reference)),
-          markdownField("*Últimos 6*\n" + fallback(movement.referenceLastDigits)),
-          markdownField("*Fecha*\n" + fallback(movement.date)),
+          markdownField("*Fecha*\n" + formatHumanDate(movement.date, timezone)),
           markdownField("*Tipo*\n" + fallback(movement.debitCredit))
         ]
       },
@@ -88,13 +88,6 @@ function buildPayload(bankName, movement, channel) {
         text: {
           type: "mrkdwn",
           text: `*Descripción*\n${escapeMrkdwn(fallback(movement.description))}`
-        }
-      },
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*Saldo*\n${escapeMrkdwn(fallback(movement.balanceText))}`
         }
       },
       {
@@ -111,6 +104,59 @@ function buildPayload(bankName, movement, channel) {
 
   if (channel) payload.channel = channel;
   return payload;
+}
+
+// "14-07-2026 11:16" -> "Hoy martes 14 de julio - 2026 · 11:16 a.m."
+// Falls back to the portal's raw text if it ever changes format, so a parsing
+// miss degrades to the old display instead of dropping the date entirely.
+function formatHumanDate(dateText, timezone) {
+  const raw = String(dateText || "").trim();
+  const match = /^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{1,2}):(\d{2}))?/.exec(raw);
+  if (!match) return fallback(dateText);
+
+  const [, day, month, year, hours, minutes] = match;
+  // Anchor at UTC noon and render in UTC: these are calendar values, not
+  // instants, so this keeps the weekday from sliding a day under any host TZ.
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), 12));
+  if (Number.isNaN(date.getTime())) return fallback(dateText);
+
+  const name = (options) =>
+    new Intl.DateTimeFormat("es-VE", { timeZone: "UTC", ...options }).format(date);
+
+  let label = `${name({ weekday: "long" })} ${Number(day)} de ${name({ month: "long" })} - ${year}`;
+
+  // "Hoy"/"Ayer" are relative to the bank's timezone, not the host's.
+  const today = calendarDayIn(timezone, 0);
+  const yesterday = calendarDayIn(timezone, -1);
+  const stamp = `${year}-${month}-${day}`;
+  if (stamp === today) label = `Hoy ${label}`;
+  else if (stamp === yesterday) label = `Ayer ${label}`;
+
+  if (hours === undefined) return label;
+  return `${label} · ${formatClock(hours, minutes)}`;
+}
+
+function formatClock(hours, minutes) {
+  const hour = Number(hours);
+  const suffix = hour < 12 ? "a.m." : "p.m.";
+  const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+  return `${hour12}:${minutes} ${suffix}`;
+}
+
+// Calendar day in `timezone`, offset by `dayOffset`, as "DD-MM-YYYY" parts
+// joined "YYYY-MM-DD" for comparison.
+function calendarDayIn(timezone, dayOffset) {
+  const at = new Date(Date.now() + dayOffset * 86_400_000);
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone || "UTC",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(at);
+  } catch {
+    return "";
+  }
 }
 
 function markdownField(text) {

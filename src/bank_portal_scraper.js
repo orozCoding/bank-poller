@@ -167,9 +167,17 @@ export class BankPortalScraper {
 
     if (await this.hasMovementsView()) return;
 
-    await this.page.waitForSelector(this.config.bank.selectors.rows, {
-      timeout: this.config.poller.timeoutMs
-    });
+    try {
+      await this.page.waitForSelector(this.config.bank.selectors.rows, {
+        timeout: this.config.poller.timeoutMs
+      });
+    } catch (error) {
+      // The Movimientos click can land without the dialog ever opening, which
+      // strands us here for the full timeout. Capture the page so the next
+      // investigation starts with evidence instead of a bare timeout.
+      await this.captureArtifacts("rows-not-found").catch(() => {});
+      throw error;
+    }
   }
 
   async extractRows() {
@@ -411,6 +419,20 @@ export class BankPortalScraper {
   }
 
   async waitForAppReady() {
+    try {
+      await this.waitForAppReadyOnce();
+    } catch (error) {
+      // This is the timeout the poller dies on most often (the portal throttles
+      // automated browsers, so renders can outrun the timeout). Capture what was
+      // on screen before rethrowing — otherwise the failure is undiagnosable.
+      // Never let the capture itself mask the timeout: the page may already be
+      // gone, which is exactly when the original error matters most.
+      await this.captureArtifacts("app-not-ready").catch(() => {});
+      throw error;
+    }
+  }
+
+  async waitForAppReadyOnce() {
     await this.page.waitForFunction((config) => {
       const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
       const bodyText = clean(document.body ? document.body.innerText : "");
